@@ -1,0 +1,15 @@
+services:
+  patchmon-mcp:
+    build: .
+    environment:
+      PATCHMON_URL: "${PATCHMON_URL:?Set PATCHMON_URL in .env}"
+      PATCHMON_API_KEY: "${PATCHMON_API_KEY:?Set PATCHMON_API_KEY in .env}"
+      PATCHMON_API_SECRET: "${PATCHMON_API_SECRET:?Set PATCHMON_API_SECRET in .env}"
+      PATCHMON_API_VERSION: "${PATCHMON_API_VERSION:-v1}"
+      PATCHMON_VERIFY_SSL: "${PATCHMON_VERIFY_SSL:-true}"
+      PATCHMON_TIMEOUT: "${PATCHMON_TIMEOUT:-30}"
+      MCP_AUTH_TOKEN: "${MCP_AUTH_TOKEN:?Set MCP_AUTH_TOKEN in .env}"
+    ports:
+      - host_ip: "${HOST:-127.0.0.1}"
+        published: "${MCP_PORT:-8000}"
+        target: 8000

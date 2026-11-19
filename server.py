@@ -5,11 +5,11 @@ PatchMon MCP Server
 
 An MCP (Model Context Protocol) server that connects to a PatchMon instance
 via its Integration API and exposes host / patch-management data as MCP
-tools, so an LLM client (Claude Desktop, Claude Code, etc.) can query and
-manage PatchMon hosts.
+tools, so an LLM client (Claude Desktop, Claude Code, etc.) can query
+PatchMon hosts.
 
 PatchMon API reference:
-https://docs.patchmon.net/books/patchmon-application-documentation/page/integration-api-documentation
+https://patchmon.net/docs/patchmon-api-integrations-guide/integration-api-documentation
 
 Authentication
 --------------
@@ -29,11 +29,12 @@ PATCHMON_API_VERSION   API version path segment, defaults to "v1"
 PATCHMON_VERIFY_SSL    "false" to disable TLS verification (dev only),
                        defaults to "true"
 PATCHMON_TIMEOUT       Request timeout in seconds, defaults to 30
+MCP_AUTH_TOKEN         Bearer token required for Streamable HTTP
+HOST                   Standalone HTTP bind address, defaults to 127.0.0.1
 
 Scopes required
 ----------------
-- `host:get`    for all read-only tools (list/info/stats/etc.)
-- `host:delete` for the delete_host tool
+- `host:get` for all tools (list/info/stats/etc.)
 
 Run
 ---
@@ -46,12 +47,15 @@ Run
 
 from __future__ import annotations
 
+import argparse
+import hmac
 import os
 import sys
 from typing import Any, Optional
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, TokenVerifier
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -67,6 +71,7 @@ PATCHMON_VERIFY_SSL = os.environ.get("PATCHMON_VERIFY_SSL", "true").lower() not 
     "no",
 )
 PATCHMON_TIMEOUT = float(os.environ.get("PATCHMON_TIMEOUT", "30"))
+MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "").strip()
 
 if not PATCHMON_URL or not PATCHMON_API_KEY or not PATCHMON_API_SECRET:
     print(
@@ -78,7 +83,16 @@ if not PATCHMON_URL or not PATCHMON_API_KEY or not PATCHMON_API_SECRET:
 
 API_BASE = f"{PATCHMON_URL}/api/{PATCHMON_API_VERSION}/api"
 
-mcp = FastMCP("patchmon")
+class MCPBearerTokenVerifier(TokenVerifier):
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not MCP_AUTH_TOKEN or not hmac.compare_digest(
+            token.encode("utf-8"), MCP_AUTH_TOKEN.encode("utf-8")
+        ):
+            return None
+        return AccessToken(token=token, client_id="patchmon-mcp", scopes=[])
+
+
+mcp = FastMCP("patchmon", auth=MCPBearerTokenVerifier())
 
 
 # --------------------------------------------------------------------------
@@ -131,7 +145,7 @@ def _request(
         hints = {
             401: "Authentication failed - check PATCHMON_API_KEY / PATCHMON_API_SECRET.",
             403: "Access denied - the credential may lack the required scope "
-            "(host:get / host:delete) or the client IP is not allowlisted.",
+            "(host:get) or the client IP is not allowlisted.",
             404: "Not found - verify the host ID (use list_hosts to look it up).",
             400: "Bad request - check that the host ID is a valid UUID.",
         }
@@ -292,29 +306,6 @@ def get_host_integrations(host_id: str) -> dict[str, Any]:
     return _request("GET", f"/hosts/{host_id}/integrations")
 
 
-@mcp.tool()
-def delete_host(host_id: str, confirm: bool = False) -> dict[str, Any]:
-    """Permanently delete a host and all related data (packages,
-    repositories, update history, Docker data, job history, group
-    memberships). This is IRREVERSIBLE and requires the host:delete scope.
-
-    Args:
-        host_id: The PatchMon host UUID (see list_hosts).
-        confirm: Must be explicitly set to true to actually perform the
-            deletion. This is a safety guard against accidental calls -
-            if false, the tool returns without making any request.
-    """
-    if not confirm:
-        return {
-            "deleted": False,
-            "message": (
-                "No action taken. Re-call this tool with confirm=true to "
-                "permanently delete this host and all its data."
-            ),
-        }
-    return _request("DELETE", f"/hosts/{host_id}")
-
-
 # --------------------------------------------------------------------------
 # Convenience / aggregate tools
 # --------------------------------------------------------------------------
@@ -363,5 +354,28 @@ def find_hosts_needing_security_updates(hostgroup: Optional[str] = None) -> dict
 # Entrypoint
 # --------------------------------------------------------------------------
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the read-only PatchMon MCP server.")
+    parser.add_argument(
+        "--transport", choices=("stdio", "http"), default="stdio",
+        help="Use standard I/O or Streamable HTTP (default: stdio).",
+    )
+    parser.add_argument(
+        "--host", default=os.environ.get("HOST") or "127.0.0.1",
+        help="HTTP bind address (defaults to HOST or 127.0.0.1).",
+    )
+    parser.add_argument("--port", type=int, default=8000, help="HTTP port.")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+
+    if not MCP_AUTH_TOKEN:
+        parser.error("MCP_AUTH_TOKEN is required for Streamable HTTP")
+
+    mcp.run(transport="http", host=args.host, port=args.port, path="/mcp")
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
